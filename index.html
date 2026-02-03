@@ -34,6 +34,10 @@
 
   <div class="row">
     <span id="summary" class="pill ok">Ок</span>
+    <label class="pill muted" style="display:flex;align-items:center;gap:6px;">
+      <input id="show-warnings" type="checkbox" />
+      Показывать предупреждения
+    </label>
     <button id="copy" class="btn">Скопировать отчёт (JSON)</button>
     <button id="clear" class="btn">Очистить</button>
   </div>
@@ -45,6 +49,7 @@
   const ta = document.getElementById('input');
   const reportEl = document.getElementById('report');
   const summaryEl = document.getElementById('summary');
+  const showWarningsEl = document.getElementById('show-warnings');
   const copyBtn = document.getElementById('copy');
   const clearBtn = document.getElementById('clear');
 
@@ -186,6 +191,11 @@
   }
 
   function render(issues) {
+    const showWarnings = !!showWarningsEl.checked;
+    const visibleIssues = showWarnings
+      ? issues
+      : issues.filter(x => x.severity !== 'warn');
+
     if (!issues.length) {
       summaryEl.textContent = 'Ок: проблем не найдено';
       summaryEl.className = 'pill ok';
@@ -199,7 +209,14 @@
     summaryEl.textContent = `Найдено: ${issues.length} (ошибок: ${errors}, предупреждений: ${warns})`;
     summaryEl.className = 'pill bad';
 
-    const rows = issues.map((x, idx) => {
+    if (!visibleIssues.length) {
+      reportEl.innerHTML = `
+        <div class="muted">Предупреждения скрыты. Включи чекбокс, чтобы увидеть детали.</div>
+      `;
+      return;
+    }
+
+    const rows = visibleIssues.map((x, idx) => {
       const sev = x.severity === 'error'
         ? '<span class="err">error</span>'
         : '<span class="warn">warn</span>';
@@ -244,6 +261,7 @@
 
   ta.addEventListener('input', update);
   ta.addEventListener('paste', () => setTimeout(update, 0));
+  showWarningsEl.addEventListener('change', update);
 
   copyBtn.addEventListener('click', async () => {
     const data = window.__lastIssues || validate(ta.value);
