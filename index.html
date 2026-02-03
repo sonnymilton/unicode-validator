@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Unicode Validator</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
+    textarea { width: 100%; min-height: 140px; font-size: 16px; padding: 10px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+    .pill { display: inline-block; padding: 6px 10px; border: 1px solid #ccc; border-radius: 999px; }
+    .bad { border-color: #d33; }
+    .ok { border-color: #2a7; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+    th { text-align: left; background: #f7f7f7; }
+    .muted { color: #666; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .small { font-size: 12px; }
+    .btn { padding: 8px 12px; border: 1px solid #ccc; background: #fff; border-radius: 8px; cursor: pointer; }
+    .btn:active { transform: translateY(1px); }
+    .warn { color: #b45309; }
+    .err { color: #b91c1c; }
+    .good { color: #047857; }
+  </style>
+</head>
+<body>
+  <h1 style="margin:0 0 10px;">Проверка “проблемных” Unicode-символов</h1>
+  <div class="muted" style="margin-bottom:10px;">
+    Находит: невидимые/управляющие символы (warn), combining marks без базы (часто дают “кружочки”), суррогаты (error).
+  </div>
+
+  <textarea id="input" placeholder="Вставь текст сюда…"></textarea>
+
+  <div class="row">
+    <span id="summary" class="pill ok">Ок</span>
+    <button id="copy" class="btn">Скопировать отчёт (JSON)</button>
+    <button id="clear" class="btn">Очистить</button>
+  </div>
+
+  <div id="report"></div>
+
+<script>
+(() => {
+  const ta = document.getElementById('input');
+  const reportEl = document.getElementById('report');
+  const summaryEl = document.getElementById('summary');
+  const copyBtn = document.getElementById('copy');
+  const clearBtn = document.getElementById('clear');
+
+  // Только \u-escape (никаких «сырых» control chars в исходнике).
+  const INVISIBLE_OR_CONTROL_RE =
+    /[\u0000-\u001F\u007F-\u009F\u00A0\u00AD\u034F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u;
+
+  // Marks в начале строки или сразу после не-буквы/цифры.
+  const MARKS_AT_START_OR_AFTER_SEPARATOR_RE = /(^|[^\p{L}\p{N}])(\p{M}+)/gu;
+
+  // Одинокие суррогатные code units.
+  const HAS_LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+
+  const segmenter = (typeof Intl !== 'undefined' && Intl.Segmenter)
+    ? new Intl.Segmenter('und', { granularity: 'grapheme' })
+    : null;
+
+  const hex = (cp) => 'U+' + cp.toString(16).toUpperCase().padStart(4, '0');
+
+  function printableChar(ch) {
+    if (ch === ' ') return '␠ (space)';
+    if (ch === '\n') return '\\n';
+    if (ch === '\r') return '\\r';
+    if (ch === '\t') return '\\t';
+    if (ch === '\u00A0') return 'NBSP';
+    if (ch === '\uFEFF') return 'BOM/ZWNBSP';
+    return ch;
+  }
+
+  function sliceContext(str, unitIndex, unitsLen) {
+    const start = Math.max(0, unitIndex - 10);
+    const end = Math.min(str.length, unitIndex + unitsLen + 10);
+    const before = str.slice(start, unitIndex);
+    const target = str.slice(unitIndex, unitIndex + unitsLen);
+    const after = str.slice(unitIndex + unitsLen, end);
+    const esc = (s) => s.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+    return esc(before) + '⟦' + esc(target) + '⟧' + esc(after);
+  }
+
+  function addIssue(issues, issue) {
+    const key = issue.type + '|' + issue.unitIndex + '|' + issue.codepoint;
+    if (!issues._keys.has(key)) {
+      issues._keys.add(key);
+      issues.push(issue);
+    }
+  }
+
+  function validate(text) {
+    const issues = [];
+    issues._keys = new Set();
+
+    // 1) Одинокие суррогаты (error)
+    if (HAS_LONE_SURROGATE.test(text)) {
+      for (let i = 0; i < text.length; i++) {
+        const cu = text.charCodeAt(i);
+        if (cu >= 0xD800 && cu <= 0xDFFF) {
+          addIssue(issues, {
+            type: 'lone_surrogate_code_unit',
+            severity: 'error',
+            unitIndex: i,
+            codepoint: 'U+' + cu.toString(16).toUpperCase().padStart(4, '0'),
+            char: '\\u' + cu.toString(16).toUpperCase().padStart(4, '0'),
+            message: 'Суррогатная кодовая единица в тексте (может ломать рендер/экспорт).',
+            context: sliceContext(text, i, 1),
+            hint: 'Пере-копировать источник или пропустить через нормальный UTF-8 пайплайн.'
+          });
+        }
+      }
+    }
+
+    // 2) Невидимые/управляющие (warn)
+    let unitIndex = 0;
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      if (INVISIBLE_OR_CONTROL_RE.test(ch)) {
+        addIssue(issues, {
+          type: 'invisible_or_control',
+          severity: 'warn',
+          unitIndex,
+          codepoint: hex(cp),
+          char: printableChar(ch),
+          message: 'Невидимый/управляющий символ (может влиять на переносы/шейпинг/поиск).',
+          context: sliceContext(text, unitIndex, ch.length),
+          hint: (cp === 0x00A0)
+            ? 'NBSP: иногда стоит заменить на обычный пробел.'
+            : (cp === 0x00AD)
+              ? 'Soft hyphen: часто лучше удалить.'
+              : 'Удалить/заменить, если не нужен осознанно.'
+        });
+      }
+      unitIndex += ch.length;
+    }
+
+    // 3) Combining marks без базы (error)
+    let m;
+    while ((m = MARKS_AT_START_OR_AFTER_SEPARATOR_RE.exec(text)) !== null) {
+      const marks = m[2];
+      const idx = m.index + m[1].length;
+      for (const ch of marks) {
+        addIssue(issues, {
+          type: 'dangling_combining_mark',
+          severity: 'error',
+          unitIndex: idx,
+          codepoint: hex(ch.codePointAt(0)),
+          char: printableChar(ch),
+          message: 'Combining mark без “базовой” буквы/цифры перед ним (часто рисуется как dotted circle).',
+          context: sliceContext(text, idx, marks.length),
+          hint: 'Проверь порядок символов: mark обычно должен идти после базовой буквы (логический порядок), даже если рисуется слева.'
+        });
+      }
+    }
+
+    // 4) Графема начинается с mark (warn)
+    if (segmenter) {
+      for (const seg of segmenter.segment(text)) {
+        const g = seg.segment;
+        if (g && /^\p{M}/u.test(g)) {
+          addIssue(issues, {
+            type: 'grapheme_starts_with_mark',
+            severity: 'warn',
+            unitIndex: seg.index,
+            codepoint: hex(g.codePointAt(0)),
+            char: printableChar(g[0]),
+            message: 'Графема начинается с combining mark — в некоторых движках это отображается некорректно.',
+            context: sliceContext(text, seg.index, g.length),
+            hint: 'Обычно это признак “оторванного” знака или невидимого разделителя перед базовой буквой.'
+          });
+        }
+      }
+    }
+
+    issues.sort((a, b) => a.unitIndex - b.unitIndex);
+    delete issues._keys;
+    return issues;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function render(issues) {
+    if (!issues.length) {
+      summaryEl.textContent = 'Ок: проблем не найдено';
+      summaryEl.className = 'pill ok';
+      reportEl.innerHTML = '<div class="good">Проблемные символы не найдены.</div>';
+      return;
+    }
+
+    const errors = issues.filter(x => x.severity === 'error').length;
+    const warns = issues.filter(x => x.severity === 'warn').length;
+
+    summaryEl.textContent = `Найдено: ${issues.length} (ошибок: ${errors}, предупреждений: ${warns})`;
+    summaryEl.className = 'pill bad';
+
+    const rows = issues.map((x, idx) => {
+      const sev = x.severity === 'error'
+        ? '<span class="err">error</span>'
+        : '<span class="warn">warn</span>';
+
+      return `
+        <tr>
+          <td class="mono">${idx + 1}</td>
+          <td>${sev}<div class="muted small">${escapeHtml(x.type)}</div></td>
+          <td class="mono">${escapeHtml(x.codepoint)}</td>
+          <td class="mono">${escapeHtml(String(x.char))}</td>
+          <td class="mono small">${escapeHtml(x.context)}</td>
+          <td>${escapeHtml(x.message)}<div class="muted small">Совет: ${escapeHtml(x.hint)}</div></td>
+        </tr>
+      `;
+    }).join('');
+
+    reportEl.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Severity / Type</th>
+            <th>Code point</th>
+            <th>Символ</th>
+            <th>Контекст</th>
+            <th>Пояснение</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="muted small" style="margin-top:8px;">
+        Примечание: позиции указаны в <span class="mono">JS code units</span>, а не в “видимых символах”.
+      </div>
+    `;
+  }
+
+  function update() {
+    const issues = validate(ta.value);
+    render(issues);
+    window.__lastIssues = issues;
+  }
+
+  ta.addEventListener('input', update);
+  ta.addEventListener('paste', () => setTimeout(update, 0));
+
+  copyBtn.addEventListener('click', async () => {
+    const data = window.__lastIssues || validate(ta.value);
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+      copyBtn.textContent = 'Скопировано!';
+      setTimeout(() => copyBtn.textContent = 'Скопировать отчёт (JSON)', 900);
+    } catch (e) {
+      alert('Не удалось скопировать (clipboard недоступен). Открой консоль и скопируй вручную: window.__lastIssues');
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    ta.value = '';
+    update();
+    ta.focus();
+  });
+
+  update();
+})();
+</script>
+</body>
+</html>
