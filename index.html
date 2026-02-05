@@ -22,6 +22,7 @@
     .warn { color: #b45309; }
     .err { color: #b91c1c; }
     .good { color: #047857; }
+    .ctx-hi { background: #fff2b8; color: #111; padding: 0 2px; border-radius: 3px; }
   </style>
 </head>
 <body>
@@ -79,14 +80,18 @@
     return ch;
   }
 
-  function sliceContext(str, unitIndex, unitsLen) {
+  function sliceContextParts(str, unitIndex, unitsLen) {
     const start = Math.max(0, unitIndex - 10);
     const end = Math.min(str.length, unitIndex + unitsLen + 10);
     const before = str.slice(start, unitIndex);
     const target = str.slice(unitIndex, unitIndex + unitsLen);
     const after = str.slice(unitIndex + unitsLen, end);
     const esc = (s) => s.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
-    return esc(before) + '⟦' + esc(target) + '⟧' + esc(after);
+    return { before: esc(before), target: esc(target), after: esc(after) };
+  }
+
+  function contextText(parts) {
+    return parts.before + parts.target + parts.after;
   }
 
   function addIssue(issues, issue) {
@@ -106,15 +111,17 @@
       for (let i = 0; i < text.length; i++) {
         const cu = text.charCodeAt(i);
         if (cu >= 0xD800 && cu <= 0xDFFF) {
+          const ctx = sliceContextParts(text, i, 1);
           addIssue(issues, {
             type: 'lone_surrogate_code_unit',
-          severity: 'error',
-          unitIndex: i,
-          unitLength: 1,
-          codepoint: 'U+' + cu.toString(16).toUpperCase().padStart(4, '0'),
-          char: '\\u' + cu.toString(16).toUpperCase().padStart(4, '0'),
-          message: 'Суррогатная кодовая единица в тексте (может ломать рендер/экспорт).',
-            context: sliceContext(text, i, 1),
+            severity: 'error',
+            unitIndex: i,
+            unitLength: 1,
+            codepoint: 'U+' + cu.toString(16).toUpperCase().padStart(4, '0'),
+            char: '\\u' + cu.toString(16).toUpperCase().padStart(4, '0'),
+            message: 'Суррогатная кодовая единица в тексте (может ломать рендер/экспорт).',
+            context: contextText(ctx),
+            contextParts: ctx,
             hint: 'Пере-копировать источник или пропустить через нормальный UTF-8 пайплайн.'
           });
         }
@@ -126,6 +133,7 @@
     for (const ch of text) {
       const cp = ch.codePointAt(0);
       if (INVISIBLE_OR_CONTROL_RE.test(ch)) {
+        const ctx = sliceContextParts(text, unitIndex, ch.length);
         addIssue(issues, {
           type: 'invisible_or_control',
           severity: 'warn',
@@ -134,7 +142,8 @@
           codepoint: hex(cp),
           char: printableChar(ch),
           message: 'Невидимый/управляющий символ (может влиять на переносы/шейпинг/поиск).',
-          context: sliceContext(text, unitIndex, ch.length),
+          context: contextText(ctx),
+          contextParts: ctx,
           hint: (cp === 0x00A0)
             ? 'NBSP: иногда стоит заменить на обычный пробел.'
             : (cp === 0x00AD)
@@ -151,6 +160,7 @@
       const marks = m[2];
       const idx = m.index + m[1].length;
       for (const ch of marks) {
+        const ctx = sliceContextParts(text, idx, marks.length);
         addIssue(issues, {
           type: 'dangling_combining_mark',
           severity: 'error',
@@ -159,7 +169,8 @@
           codepoint: hex(ch.codePointAt(0)),
           char: printableChar(ch),
           message: 'Combining mark без “базовой” буквы/цифры перед ним (часто рисуется как dotted circle).',
-          context: sliceContext(text, idx, marks.length),
+          context: contextText(ctx),
+          contextParts: ctx,
           hint: 'Проверь порядок символов: mark обычно должен идти после базовой буквы (логический порядок), даже если рисуется слева.'
         });
       }
@@ -170,6 +181,7 @@
       for (const seg of segmenter.segment(text)) {
         const g = seg.segment;
         if (g && /^\p{M}/u.test(g)) {
+          const ctx = sliceContextParts(text, seg.index, g.length);
           addIssue(issues, {
             type: 'grapheme_starts_with_mark',
             severity: 'warn',
@@ -178,7 +190,8 @@
             codepoint: hex(g.codePointAt(0)),
             char: printableChar(g[0]),
             message: 'Графема начинается с combining mark — в некоторых движках это отображается некорректно.',
-            context: sliceContext(text, seg.index, g.length),
+            context: contextText(ctx),
+            contextParts: ctx,
             hint: 'Обычно это признак “оторванного” знака или невидимого разделителя перед базовой буквой.'
           });
         }
@@ -225,13 +238,17 @@
         ? '<span class="err">error</span>'
         : '<span class="warn">warn</span>';
 
+      const ctx = (x.contextParts)
+        ? `${escapeHtml(x.contextParts.before)}<span class="ctx-hi">${escapeHtml(x.contextParts.target)}</span>${escapeHtml(x.contextParts.after)}`
+        : escapeHtml(x.context);
+
       return `
         <tr>
           <td class="mono">${idx + 1}</td>
           <td>${sev}<div class="muted small">${escapeHtml(x.type)}</div></td>
           <td class="mono">${escapeHtml(x.codepoint)}</td>
           <td class="mono">${escapeHtml(String(x.char))}</td>
-          <td class="mono small">${escapeHtml(x.context)}</td>
+          <td class="mono small">${ctx}</td>
           <td>${escapeHtml(x.message)}<div class="muted small">Совет: ${escapeHtml(x.hint)}</div></td>
           <td><button class="btn small" data-action="select" data-start="${x.unitIndex}" data-len="${x.unitLength}">Выделить</button></td>
         </tr>
