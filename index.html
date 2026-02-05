@@ -108,11 +108,12 @@
         if (cu >= 0xD800 && cu <= 0xDFFF) {
           addIssue(issues, {
             type: 'lone_surrogate_code_unit',
-            severity: 'error',
-            unitIndex: i,
-            codepoint: 'U+' + cu.toString(16).toUpperCase().padStart(4, '0'),
-            char: '\\u' + cu.toString(16).toUpperCase().padStart(4, '0'),
-            message: 'Суррогатная кодовая единица в тексте (может ломать рендер/экспорт).',
+          severity: 'error',
+          unitIndex: i,
+          unitLength: 1,
+          codepoint: 'U+' + cu.toString(16).toUpperCase().padStart(4, '0'),
+          char: '\\u' + cu.toString(16).toUpperCase().padStart(4, '0'),
+          message: 'Суррогатная кодовая единица в тексте (может ломать рендер/экспорт).',
             context: sliceContext(text, i, 1),
             hint: 'Пере-копировать источник или пропустить через нормальный UTF-8 пайплайн.'
           });
@@ -129,6 +130,7 @@
           type: 'invisible_or_control',
           severity: 'warn',
           unitIndex,
+          unitLength: ch.length,
           codepoint: hex(cp),
           char: printableChar(ch),
           message: 'Невидимый/управляющий символ (может влиять на переносы/шейпинг/поиск).',
@@ -153,6 +155,7 @@
           type: 'dangling_combining_mark',
           severity: 'error',
           unitIndex: idx,
+          unitLength: ch.length,
           codepoint: hex(ch.codePointAt(0)),
           char: printableChar(ch),
           message: 'Combining mark без “базовой” буквы/цифры перед ним (часто рисуется как dotted circle).',
@@ -171,6 +174,7 @@
             type: 'grapheme_starts_with_mark',
             severity: 'warn',
             unitIndex: seg.index,
+            unitLength: g[0].length,
             codepoint: hex(g.codePointAt(0)),
             char: printableChar(g[0]),
             message: 'Графема начинается с combining mark — в некоторых движках это отображается некорректно.',
@@ -229,6 +233,7 @@
           <td class="mono">${escapeHtml(String(x.char))}</td>
           <td class="mono small">${escapeHtml(x.context)}</td>
           <td>${escapeHtml(x.message)}<div class="muted small">Совет: ${escapeHtml(x.hint)}</div></td>
+          <td><button class="btn small" data-action="select" data-start="${x.unitIndex}" data-len="${x.unitLength}">Выделить</button></td>
         </tr>
       `;
     }).join('');
@@ -243,6 +248,7 @@
             <th>Символ</th>
             <th>Контекст</th>
             <th>Пояснение</th>
+            <th>Действие</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -262,6 +268,14 @@
   ta.addEventListener('input', update);
   ta.addEventListener('paste', () => setTimeout(update, 0));
   showWarningsEl.addEventListener('change', update);
+  reportEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action="select"]');
+    if (!btn) return;
+    const start = Number(btn.dataset.start);
+    const len = Number(btn.dataset.len) || 1;
+    ta.focus();
+    ta.setSelectionRange(start, start + len);
+  });
 
   copyBtn.addEventListener('click', async () => {
     const data = window.__lastIssues || validate(ta.value);
